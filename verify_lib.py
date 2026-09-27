@@ -210,7 +210,15 @@ def check_urls(text: str, trusted_facts: list[dict]) -> list[str]:
 # candidate mention — and then explicitly reject/flag any such mention that
 # contains a non-ASCII character, since trusted fact `id`s are documented to
 # be plain ASCII. This can't be evaded by choosing a different script.
-_ENTITY_BOUNDARY = ' \t\n\r\f\v()[]<>*`"\'　，。！？；：、「」『』（）'
+# Includes standard ASCII punctuation (, . ; : ! ?) as valid delimiters, on
+# top of whitespace/brackets/quotes/fullwidth punctuation and the numeric
+# marker symbols (★ $ #) — this was a real regression: an earlier version
+# omitted plain ASCII punctuation, so a trailing comma/semicolon got pulled
+# INTO the token ("openai/whisper," misread as a fabricated entity because
+# of the trailing comma), and a marker glued directly onto the name with no
+# space ("openai/whisper★71234") got pulled in too, tripping the non-ASCII
+# check on ★ itself even though the entity name "openai/whisper" was fine.
+_ENTITY_BOUNDARY = ' \t\n\r\f\v()[]<>*`"\'　，。！？；：、「」『』（）,.;:!?★$#'
 _ENTITY_TOKEN_CHARS = r"[^" + re.escape(_ENTITY_BOUNDARY) + r"/]"
 DEFAULT_ENTITY_RE = re.compile(
     r"(" + _ENTITY_TOKEN_CHARS + r"+/" + _ENTITY_TOKEN_CHARS + r"+)"
@@ -332,7 +340,17 @@ def check_entities_and_metrics(
 
 
 # --------------------------------------------------------------------------
-# 4. Secret scanning — strict per-provider shape (no false pos/neg)
+# 4. Secret scanning — strict per-provider shape
+#
+# NOT a claim of zero false positives/negatives against every real-world key
+# format that exists or will exist — that would be overclaiming. It covers
+# the specific formats listed below, matched on real structural markers
+# rather than punctuation heuristics, and the two concrete
+# false-positive/false-negative bugs found during review (see README) are
+# fixed. New provider formats (OpenAI alone has added `sk-svcacct-` service
+# account keys and a `sk-None-` shape seen when an org id is unset) need
+# their own pattern added here; anything not listed is a documented gap —
+# see README "Known Limitations".
 # --------------------------------------------------------------------------
 
 # NOTE on the "no hyphens in the key body" idea: that is NOT a rule real
@@ -356,8 +374,10 @@ def check_entities_and_metrics(
 # This distinguishes on a real structural marker instead of a punctuation
 # heuristic that happened to be false.
 SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
-    ("OpenAI API key (legacy sk-)", re.compile(r"\bsk-(?!proj-)[A-Za-z0-9]{20,}\b")),
+    ("OpenAI API key (legacy sk-)", re.compile(r"\bsk-(?!proj-|svcacct-|None-)[A-Za-z0-9]{20,}\b")),
     ("OpenAI API key (sk-proj-)", re.compile(r"\bsk-proj-[A-Za-z0-9_-]{20,}\b")),
+    ("OpenAI API key (sk-svcacct-, service account)", re.compile(r"\bsk-svcacct-[A-Za-z0-9_-]{20,}\b")),
+    ("OpenAI API key (sk-None-, unset org id)", re.compile(r"\bsk-None-[A-Za-z0-9_-]{20,}\b")),
     ("Anthropic API key (sk-ant-)", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b")),
     ("GitHub token", re.compile(r"\b(?:ghp_|gho_|github_pat_)[A-Za-z0-9_]{20,}\b")),
     ("AWS access key id", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),

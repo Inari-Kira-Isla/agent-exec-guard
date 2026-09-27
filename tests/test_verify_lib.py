@@ -96,6 +96,41 @@ def test_ascii_only_real_entity_is_not_flagged_as_homoglyph():
 
 
 # --------------------------------------------------------------------------
+# Regression (found in review round 2): the boundary character class used to
+# reject non-ASCII entity tokens didn't include standard ASCII punctuation,
+# so a trailing comma/semicolon got pulled INTO the entity token, and a
+# marker glued directly onto a name with no space got pulled in too and
+# tripped the homoglyph check on a real, legitimate entity.
+# --------------------------------------------------------------------------
+
+
+def test_trailing_ascii_punctuation_is_not_pulled_into_entity_token():
+    text = "openai/whisper, fake/repo;"
+    mentions = vl.extract_entity_mentions(text)
+    assert "openai/whisper" in mentions
+    assert "fake/repo" in mentions
+    # neither mention should carry the trailing punctuation into the token
+    assert "openai/whisper," not in mentions
+    assert "fake/repo;" not in mentions
+    # and the real entity must not be misflagged just because of the comma
+    errors = vl.check_entities_and_metrics(text, TRUSTED_FACTS)
+    assert not any("openai/whisper" in e for e in errors)
+
+
+def test_marker_glued_to_name_with_no_space_is_not_flagged_as_homoglyph():
+    # "openai/whisper★71234" - no space before the ★ marker. The ★ must be
+    # treated as a boundary, not pulled into the entity token, otherwise a
+    # real ASCII entity gets wrongly flagged as containing a non-ASCII
+    # character.
+    text = "openai/whisper★71234 is huge."
+    mentions = vl.extract_entity_mentions(text)
+    assert "openai/whisper" in mentions
+    errors = vl.check_entities_and_metrics(text, TRUSTED_FACTS, metric_key="stars")
+    assert not any("non-ASCII" in e or "homoglyph" in e for e in errors), errors
+    assert errors == [], errors  # ★71234 also matches the real star count
+
+
+# --------------------------------------------------------------------------
 # Bug 3b: protocol-relative URL (//evil.example.com) bypasses a naive
 # `https://`-prefix-only check.
 # --------------------------------------------------------------------------
@@ -182,6 +217,25 @@ def test_openai_sk_proj_key_with_hyphens_and_underscores_is_detected():
     text = f"Oops, leaked credential: {fake_key}"
     findings = vl.scan_secrets(text)
     assert any("sk-proj" in f for f in findings), findings
+
+
+def test_openai_sk_svcacct_key_is_detected():
+    # sk-svcacct- (service account) keys were a real, confirmed
+    # false-negative found in review round 2 — not covered by the
+    # legacy/sk-proj- patterns.
+    fake_key = "sk-svcacct-" + "AbCdEfGh12345678-XyZ90123456789_QwErTy00"
+    text = f"Oops, leaked credential: {fake_key}"
+    findings = vl.scan_secrets(text)
+    assert any("svcacct" in f for f in findings), findings
+
+
+def test_openai_sk_none_key_is_detected():
+    # sk-None- (seen when an org id is unset client-side) was the other
+    # confirmed false-negative from review round 2.
+    fake_key = "sk-None-" + "AbCdEfGh12345678-XyZ90123456789_QwErTy00"
+    text = f"Oops, leaked credential: {fake_key}"
+    findings = vl.scan_secrets(text)
+    assert any("sk-None" in f for f in findings), findings
 
 
 def test_sk_hynix_real_url_still_not_flagged_after_sk_proj_fix():

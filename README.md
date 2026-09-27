@@ -96,19 +96,34 @@ bypass classes:
 - Re-verify the source JSON's sha256 hasn't changed after the run.
 - Detect entity mentions **whether or not** they're bold or attached to a
   URL — a fabricated name that just skips the markup still needs to fail.
-  Entity-shaped tokens are matched on whitespace/punctuation boundaries
-  rather than `\b` for this same reason (see below).
+  Entity-shaped tokens are matched on a boundary character class —
+  whitespace, brackets/quotes, fullwidth CJK punctuation, standard ASCII
+  punctuation (`, . ; : ! ?`), and the numeric marker symbols (`★ $ #`) —
+  rather than `\b`, for this same reason (see below). Standard ASCII
+  punctuation had to be added explicitly here after review found a
+  regression: without it, a trailing comma got pulled into the match
+  (`"openai/whisper,"` misread as a different, fabricated entity) and a
+  marker glued directly onto a name with no space
+  (`"openai/whisper★71234"`) pulled the `★` into the token and tripped the
+  non-ASCII/homoglyph check on a real entity.
 - Catch scheme-less and protocol-relative URLs/domains, not just
   `https://`-prefixed ones.
 - Distinguish real keys from look-alike URL text using a **structural
   marker** per provider, not a punctuation heuristic: OpenAI legacy `sk-`
   keys are matched as a long contiguous alnum run (no hyphen) with a
-  negative lookahead against `proj-`; OpenAI `sk-proj-` keys are matched
-  separately, requiring the literal `proj-` marker, and hyphens/underscores
-  are allowed in that body; `sk-ant-` (Anthropic) is its own explicit
-  pattern. `sk-hynix-reportedly-...` matches none of the three, because it
-  contains neither 20+ contiguous alnum chars after `sk-` nor the literal
-  `proj-`/`ant-` markers.
+  negative lookahead against `proj-`/`svcacct-`/`None-`; OpenAI
+  `sk-proj-`, `sk-svcacct-` (service account keys), and `sk-None-` (seen
+  when an org id is unset client-side) keys are each matched separately,
+  requiring their own literal marker, with hyphens/underscores allowed in
+  the body; `sk-ant-` (Anthropic) is its own explicit pattern.
+  `sk-hynix-reportedly-...` matches none of these, because it contains
+  neither 20+ contiguous alnum chars after `sk-` nor any of the literal
+  markers. (The `sk-svcacct-`/`sk-None-` formats and the ASCII-punctuation
+  entity-boundary fix below were both found in a second adversarial review
+  round, after the first version of this pattern list shipped — see
+  `verify_lib.py`'s SECRET_PATTERNS comment for the standing caveat that
+  this is not a claim of zero false positives/negatives against every key
+  format that exists.)
 - Verify claims against **both** the entity *and* its numeric fact — a real
   repo name attached to a fabricated star count is still a fabrication; the
   claimed number must match the source record's real value within
@@ -134,7 +149,7 @@ Every one of these is a real `pytest` test in `tests/test_verify_lib.py`
 `test_openai_sk_proj_key_with_hyphens_and_underscores_is_detected`,
 `test_cyrillic_homoglyph_entity_is_caught`,
 `test_star_count_mismatch_is_caught`,
-`test_sha256_tamper_after_run_is_detected`, plus supporting cases — 25
+`test_sha256_tamper_after_run_is_detected`, plus supporting cases — 29
 tests total). Each bypass also has a runnable, **committed** side-by-side
 comparison in `examples/naive_vs_fixed_demo.py`: a deliberately naive
 stand-in implementation (bold-only entity regex, `https://`-prefix-only URL
@@ -287,10 +302,11 @@ domain-specific extractor rather than a regex tweak:
 
 ## What was actually verified for real vs. what wasn't
 
-- `verify_lib.py`: all 25 pytest cases run and pass on this machine
+- `verify_lib.py`: all 29 pytest cases run and pass on this machine
   (`pytest tests/`). Every documented bug — including the two found in the
-  follow-up review round (Unicode homoglyph, the `sk-proj-` false negative
-  in the original "no hyphens" fix) — has a dedicated test, plus a
+  follow-up review rounds (Unicode homoglyph, the `sk-proj-`/`sk-svcacct-`/
+  `sk-None-` false negatives, and the ASCII-punctuation entity-boundary
+  regression) — has a dedicated test, plus a
   companion runnable comparison in `examples/naive_vs_fixed_demo.py`
   showing a naive implementation get bypassed on the exact same input.
 - `harden-codex-exec.sh`: run for real against a live `codex exec` call on
